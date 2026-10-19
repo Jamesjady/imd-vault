@@ -98,7 +98,8 @@ withdrawal, the pending manager's delay, the creator in the registry and the rec
 ## Addresses
 
 - IMD (Ethereum): `0xD34a99Bc0f67aE1bbd63C660e6d0b0dd03E263B7`
-- VaultFactory: not deployed yet. Ethereum: `new VaultFactory(IMD, radarWallet)`. Robinhood: `new VaultFactory(address(0), address(0))`.
+- VaultFactory (Ethereum): [`0xdbaff609cd0500527a2a102f5cbbbbc70fd2ff5b`](https://etherscan.io/address/0xdbaff609cd0500527a2a102f5cbbbbc70fd2ff5b), audited and deployed by the IMD swarm in launch 2244 ([job](https://explorer.imd.fun/jobs/b384d442-601d-4fbb-9b90-3681b2aa1868), [delivered source](https://github.com/identity-md-launches/launch-2244-audit-deploy-imd-vault)). Fee recipient: IMD RADAR, `0x75df3d2e7a1d23021e5d7ef06312d13009e9bbb8`.
+- VaultFactory (Robinhood): pending, the same audited code with `imd_` and `feeRecipient_` zero.
 
 ## The IMD RADAR seal
 
