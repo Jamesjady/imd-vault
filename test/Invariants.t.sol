@@ -344,6 +344,7 @@ contract TreasuryHandler is Test {
     mapping(address => uint256) public gStartBal;
     mapping(address => uint256) public gRate;
     mapping(address => uint256) public gSpent;
+    mapping(uint256 => uint256) public gExpiry; // withdrawal id => queuedAt + delay then + GRACE
     uint64 public lastDelay;
     uint16 public lastRate;
     uint256 public lastDestCount;
@@ -400,7 +401,9 @@ contract TreasuryHandler is Test {
             t.queue(asset, to, amount);
             return;
         }
-        t.queue(asset, to, amount);
+        uint256 id = t.queue(asset, to, amount);
+        // the expiry is fixed at queue time: a later increaseDelay can never move it
+        gExpiry[id] = block.timestamp + t.delay() + 14 days;
     }
 
     function strangerQueue(uint256 ai, uint256 amount) external {
@@ -413,7 +416,7 @@ contract TreasuryHandler is Test {
         uint256 n = t.withdrawalCount();
         if (n == 0) return;
         id = id % n;
-        (,,,, bool done) = t.withdrawals(id);
+        (,,,,, bool done) = t.withdrawals(id);
         vm.prank(manager);
         if (done) vm.expectRevert(TreasuryVault.AlreadyDone.selector);
         t.cancel(id);
@@ -423,7 +426,8 @@ contract TreasuryHandler is Test {
         uint256 n = t.withdrawalCount();
         if (n == 0) return;
         id = id % n;
-        (address asset, address to, uint256 amount, uint64 queuedAt, bool done) = t.withdrawals(id);
+        (address asset, address to, uint256 amount, uint64 queuedAt, uint64 expiresAt, bool done) = t.withdrawals(id);
+        if (expiresAt != gExpiry[id]) _bad("expiry moved after queueing");
         uint256 balBefore = asset == address(0) ? address(t).balance : tok.balanceOf(address(t));
         uint256 toBefore = asset == address(0) ? to.balance : tok.balanceOf(to);
         uint16 rateNow = t.rateBps();
@@ -433,7 +437,7 @@ contract TreasuryHandler is Test {
             if (done) _bad("executed twice or after cancel");
             if (block.timestamp < uint256(queuedAt) + t.delay()) _bad("executed before the delay");
             if (block.timestamp < uint256(queuedAt) + 1 days) _bad("executed before 24h");
-            if (block.timestamp > uint256(queuedAt) + t.delay() + 14 days) _bad("executed after grace");
+            if (block.timestamp > gExpiry[id]) _bad("executed after the expiry fixed at queue time");
             if (!t.isDestination(to)) _bad("paid a destination not allowed");
             uint256 toAfter = asset == address(0) ? to.balance : tok.balanceOf(to);
             if (toAfter - toBefore != amount) _bad("destination did not get the amount");
@@ -750,6 +754,8 @@ contract FactoryInvariantTest is Test {
             address v = h.vaultAt(i);
             assertTrue(f.isVault(v));
             assertEq(f.allVaults(i), v);
+            address c = f.creatorOf(v);
+            assertTrue(c == h.payers(0) || c == h.payers(1) || c == h.payers(2), "every vault filed under its creator");
         }
     }
 }
