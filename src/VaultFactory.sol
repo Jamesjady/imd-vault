@@ -14,6 +14,8 @@ import {TreasuryVault} from "./TreasuryVault.sol";
 ///      - On Ethereum (`imd` set), a project's first vault charges the fee for its token.
 ///      - On other chains (`imd` is zero, e.g. Robinhood), vaults are free to create; the project pays on Ethereum with
 ///        `payFor(chainId, token)`, and the radar reads `feePaid` there before granting its seal.
+///      A vault made before its token exists (an open vesting vault, or a treasury with no project token yet) is
+///      keyed by its own address instead: `feePaid[chainId][vault]`.
 contract VaultFactory {
     using SafeERC20 for IERC20;
 
@@ -70,6 +72,7 @@ contract VaultFactory {
         external
         returns (VestingVault vault)
     {
+        if (address(token) == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
         _chargeOnce(address(token));
         vault = new VestingVault(token, beneficiary, start, cliff, duration, BENEFICIARY_DELAY);
@@ -78,16 +81,32 @@ contract VaultFactory {
         emit VestingCreated(address(vault), address(token), beneficiary, amount, start, cliff, duration);
     }
 
+    /// @notice Creates an open vesting vault before the token exists, to be named as the swarm launch's
+    ///         `remainderTo`: the project's share of the supply then arrives here in the launch transaction and
+    ///         vests on this schedule. Any token it receives vests the same way. The fee (5 IMD on Ethereum) is keyed
+    ///         to the vault, since the token does not exist yet.
+    function createLaunchVesting(address beneficiary, uint64 start, uint64 cliff, uint64 duration)
+        external
+        returns (VestingVault vault)
+    {
+        vault = new VestingVault(IERC20(address(0)), beneficiary, start, cliff, duration, BENEFICIARY_DELAY);
+        _chargeOnce(address(vault));
+        _register(address(vault), address(0));
+        emit VestingCreated(address(vault), address(0), beneficiary, 0, start, cliff, duration);
+    }
+
     /// @notice Creates a treasury vault for `projectToken`. Fund it afterwards by sending tokens or ETH to it.
     ///         An empty `destinations` list leaves it open to any destination (it can be restricted later, never
     ///         reopened). For a project's first vault on Ethereum the caller must have approved this factory for 5 IMD.
+    ///         With `projectToken` zero it can be made before a launch and named as its `remainderTo`; the fee is
+    ///         then keyed to the vault.
     function createTreasury(address projectToken, address manager, uint64 delay, uint16 rateBps, address[] calldata destinations)
         external
         returns (TreasuryVault vault)
     {
         if (delay < MIN_DELAY) revert BadDelay();
-        _chargeOnce(projectToken);
         vault = new TreasuryVault(projectToken, manager, delay, rateBps, destinations);
+        _chargeOnce(projectToken != address(0) ? projectToken : address(vault));
         _register(address(vault), projectToken);
         emit TreasuryCreated(address(vault), projectToken, manager, delay, rateBps, destinations);
     }

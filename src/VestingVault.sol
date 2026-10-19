@@ -6,17 +6,25 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /// @title VestingVault
-/// @notice Holds one token and releases it to a beneficiary on a schedule: nothing during the cliff, then linearly
-///         over `duration`. No schedule can unlock more than 25% of the tokens in any week. Nobody owns this contract. The schedule can only get longer, and a new beneficiary takes
-///         over only after a public delay. There is no admin, no pause and no emergency withdrawal.
-/// @dev The amount under vesting is this contract's balance plus what it already released, so tokens that charge
-///      a transfer fee and later top-ups are both accounted for: everything that arrives vests on the same schedule.
+/// @notice Holds tokens and releases them to a beneficiary on a schedule: nothing during the cliff, then linearly
+///         over `duration`. No schedule can unlock more than 25% of the tokens in any week. Nobody owns this contract.
+///         The schedule can only get longer, and a new beneficiary takes over only after a public delay. There is no
+///         admin, no pause and no emergency withdrawal.
+///
+///         A vault is either bound to one `token`, or open (`token` is zero). An open vault is made before a token
+///         exists: a project puts its address as the launch's `remainderTo`, so its share of the supply arrives here
+///         in the launch transaction and never passes through the team's wallet. Every token an open vault holds vests
+///         on the same schedule.
+/// @dev The amount under vesting, per token, is this contract's balance plus what it already released, so tokens
+///      that charge a transfer fee and later top-ups are both accounted for: everything that arrives vests on the same
+///      schedule.
 contract VestingVault is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     /// @notice The shortest linear unlock allowed: 4 weeks, so at most 25% of the tokens unlock in any 7 days.
     uint64 public constant MIN_DURATION = 28 days;
 
+    /// @notice The vested token, or zero for an open vault that vests any token it receives.
     IERC20 public immutable token;
     uint64 public immutable start;
     uint64 public immutable cliff; // seconds after start before anything unlocks
@@ -24,12 +32,12 @@ contract VestingVault is ReentrancyGuard {
 
     uint64 public duration; // length of the linear unlock after the cliff; can only grow
     address public beneficiary;
-    uint256 public released;
+    mapping(address => uint256) public released;
 
     address public pendingBeneficiary;
     uint64 public pendingBeneficiaryEta;
 
-    event Released(address indexed beneficiary, uint256 amount);
+    event Released(address indexed token, address indexed beneficiary, uint256 amount);
     event DurationExtended(uint64 oldDuration, uint64 newDuration);
     event BeneficiaryProposed(address indexed current, address indexed proposed, uint64 eta);
     event BeneficiaryCancelled(address indexed proposed);
@@ -44,6 +52,7 @@ contract VestingVault is ReentrancyGuard {
     error NoProposal();
     error TooEarly(uint64 eta);
     error NotLonger();
+    error NotVested(address token);
     error VestingToken();
 
     modifier onlyBeneficiary() {
@@ -52,7 +61,7 @@ contract VestingVault is ReentrancyGuard {
     }
 
     constructor(IERC20 token_, address beneficiary_, uint64 start_, uint64 cliff_, uint64 duration_, uint64 beneficiaryDelay_) {
-        if (address(token_) == address(0) || beneficiary_ == address(0)) revert ZeroAddress();
+        if (beneficiary_ == address(0)) revert ZeroAddress();
         if (duration_ < MIN_DURATION) revert BadSchedule();
         token = token_;
         beneficiary = beneficiary_;
@@ -64,35 +73,44 @@ contract VestingVault is ReentrancyGuard {
 
     // ---------- the schedule ----------
 
-    /// @notice Everything this vault has ever held for vesting: what it holds now plus what it already released.
-    function totalAllocation() public view returns (uint256) {
-        return token.balanceOf(address(this)) + released;
+    /// @notice True when `asset` vests here: the bound token, or any token in an open vault.
+    function vests(address asset) public view returns (bool) {
+        return asset != address(0) && (address(token) == address(0) || asset == address(token));
     }
 
-    /// @notice How much has vested by `timestamp`, released or not.
-    function vestedAmount(uint64 timestamp) public view returns (uint256) {
+    /// @notice Everything this vault has ever held of `asset` for vesting: what it holds now plus what it released.
+    function totalAllocation(address asset) public view returns (uint256) {
+        return IERC20(asset).balanceOf(address(this)) + released[asset];
+    }
+
+    /// @notice How much of `asset` has vested by `timestamp`, released or not.
+    function vestedAmount(address asset, uint64 timestamp) public view returns (uint256) {
         uint64 unlockStart = start + cliff;
         if (timestamp < unlockStart) return 0;
-        uint256 total = totalAllocation();
+        uint256 total = totalAllocation(asset);
         uint64 elapsed = timestamp - unlockStart;
         if (elapsed >= duration) return total;
         return (total * elapsed) / duration;
     }
 
-    /// @notice What the beneficiary can take right now.
-    function releasable() public view returns (uint256) {
-        uint256 vested = vestedAmount(uint64(block.timestamp));
-        return vested > released ? vested - released : 0;
+    /// @notice What the beneficiary can take of `asset` right now.
+    function releasable(address asset) public view returns (uint256) {
+        if (!vests(asset)) return 0;
+        uint256 vested = vestedAmount(asset, uint64(block.timestamp));
+        uint256 done = released[asset];
+        return vested > done ? vested - done : 0;
     }
 
-    /// @notice Sends what has vested to the beneficiary. Anyone can call it; the tokens only ever go to the beneficiary.
-    function release() external nonReentrant {
-        uint256 amount = releasable();
+    /// @notice Sends what has vested of `asset` to the beneficiary. Anyone can call it; the tokens only ever go to the
+    ///         beneficiary.
+    function release(address asset) external nonReentrant {
+        if (!vests(asset)) revert NotVested(asset);
+        uint256 amount = releasable(asset);
         if (amount == 0) revert NothingToRelease();
-        released += amount;
+        released[asset] += amount;
         address to = beneficiary;
-        token.safeTransfer(to, amount);
-        emit Released(to, amount);
+        IERC20(asset).safeTransfer(to, amount);
+        emit Released(asset, to, amount);
     }
 
     /// @notice Makes the vesting last longer. It can never be shortened.
@@ -133,10 +151,10 @@ contract VestingVault is ReentrancyGuard {
 
     // ---------- tokens sent here by mistake ----------
 
-    /// @notice Returns any other token sent here by mistake to the beneficiary. The vesting token can never leave
-    ///         through this path.
+    /// @notice In a bound vault, returns any other token sent here by mistake to the beneficiary. The vested token can
+    ///         never leave through this path, and an open vault has no such path: everything it holds vests.
     function recover(IERC20 otherToken) external nonReentrant {
-        if (address(otherToken) == address(token)) revert VestingToken();
+        if (vests(address(otherToken))) revert VestingToken();
         uint256 amount = otherToken.balanceOf(address(this));
         address to = beneficiary;
         otherToken.safeTransfer(to, amount);

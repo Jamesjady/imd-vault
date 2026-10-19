@@ -31,7 +31,7 @@ contract ForkTest is Test {
         assertEq(IMD.balanceOf(RADAR) - radarBefore, 5e18);
         assertEq(IMD.balanceOf(address(v)), 1000e18);
         vm.warp(block.timestamp + 30 days);
-        v.release();
+        v.release(address(IMD));
         assertEq(IMD.balanceOf(team), 1000e18);
     }
 }

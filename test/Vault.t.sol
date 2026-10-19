@@ -159,26 +159,26 @@ contract VaultTest is Test {
 
     function test_VestingCliffThenLinear() public {
         VestingVault v = _vesting(1200e18, 30 days, 120 days);
-        assertEq(v.releasable(), 0);
+        assertEq(v.releasable(address(token)), 0);
         vm.expectRevert(VestingVault.NothingToRelease.selector);
-        v.release();
+        v.release(address(token));
 
         vm.warp(block.timestamp + 30 days); // cliff over: the linear unlock starts here, nothing jumps
-        assertEq(v.releasable(), 0);
+        assertEq(v.releasable(address(token)), 0);
 
         vm.warp(block.timestamp + 30 days);
-        assertEq(v.releasable(), 300e18);
+        assertEq(v.releasable(address(token)), 300e18);
 
         vm.prank(stranger); // anyone can release, the beneficiary gets paid
-        v.release();
+        v.release(address(token));
         assertEq(token.balanceOf(team), 300e18);
 
         vm.warp(block.timestamp + 30 days);
-        v.release();
+        v.release(address(token));
         assertEq(token.balanceOf(team), 600e18);
 
         vm.warp(block.timestamp + 365 days);
-        v.release();
+        v.release(address(token));
         assertEq(token.balanceOf(team), 1200e18);
         assertEq(token.balanceOf(address(v)), 0);
     }
@@ -188,7 +188,7 @@ contract VaultTest is Test {
         vm.warp(block.timestamp + 50 days);
         vm.prank(project);
         token.transfer(address(v), 1000e18);
-        assertEq(v.releasable(), 1000e18); // half of 2000
+        assertEq(v.releasable(address(token)), 1000e18); // half of 2000
     }
 
     function test_VestingFeeOnTransferToken() public {
@@ -198,9 +198,9 @@ contract VaultTest is Test {
         ft.approve(address(factory), type(uint256).max);
         VestingVault v = factory.createVesting(IERC20(address(ft)), team, 1000e18, uint64(block.timestamp), 0, 28 days);
         vm.stopPrank();
-        assertEq(v.totalAllocation(), 990e18);
+        assertEq(v.totalAllocation(address(ft)), 990e18);
         vm.warp(block.timestamp + 28 days);
-        v.release(); // must not revert even though the vault receives less than it was told
+        v.release(address(ft)); // must not revert even though the vault receives less than it was told
         assertEq(ft.balanceOf(address(v)), 0);
     }
 
@@ -215,16 +215,16 @@ contract VaultTest is Test {
         vm.prank(team);
         v.extendDuration(200 days);
         vm.warp(block.timestamp + 100 days);
-        assertEq(v.releasable(), 500e18);
+        assertEq(v.releasable(address(token)), 500e18);
     }
 
     function test_VestingExtendAfterReleaseNeverUnderflows() public {
         VestingVault v = _vesting(1000e18, 0, 100 days);
         vm.warp(block.timestamp + 80 days);
-        v.release();
+        v.release(address(token));
         vm.prank(team);
         v.extendDuration(400 days); // vested now falls below what was released
-        assertEq(v.releasable(), 0);
+        assertEq(v.releasable(address(token)), 0);
     }
 
     function test_VestingBeneficiaryChangeIsDelayed() public {
@@ -245,7 +245,7 @@ contract VaultTest is Test {
         vm.prank(next);
         v.acceptBeneficiary();
         assertEq(v.beneficiary(), next);
-        v.release();
+        v.release(address(token));
         assertEq(token.balanceOf(next), 70e18);
     }
 
@@ -287,7 +287,7 @@ contract VaultTest is Test {
         cliff = uint64(bound(cliff, 0, 365 days));
         VestingVault v = _vesting(amount, cliff, duration);
         uint64 t = uint64(bound(at, block.timestamp, block.timestamp + cliff + duration));
-        uint256 week = v.vestedAmount(t + 7 days) - v.vestedAmount(t);
+        uint256 week = v.vestedAmount(address(token), t + 7 days) - v.vestedAmount(address(token), t);
         assertLe(week, amount / 4 + 1);
     }
 
@@ -299,15 +299,110 @@ contract VaultTest is Test {
         uint256 last;
         for (uint256 i; i < steps.length; ++i) {
             vm.warp(block.timestamp + steps[i]);
-            uint256 vested = v.vestedAmount(uint64(block.timestamp));
+            uint256 vested = v.vestedAmount(address(token), uint64(block.timestamp));
             assertGe(vested, last);
             last = vested;
-            if (v.releasable() > 0) v.release();
+            if (v.releasable(address(token)) > 0) v.release(address(token));
             assertLe(token.balanceOf(team), amount);
         }
         vm.warp(block.timestamp + cliff + duration);
-        if (v.releasable() > 0) v.release();
+        if (v.releasable(address(token)) > 0) v.release(address(token));
         assertEq(token.balanceOf(team), amount);
+    }
+
+    // =================== vaults made before the launch (remainderTo) ===================
+
+    /// @dev Stands in for the swarm's launch factory: it mints the supply and sends the remainder to remainderTo
+    ///      in the same transaction, as launch 2242 did on chain.
+    function _launch(address remainderTo, uint256 remainder) internal returns (MockToken launched) {
+        launched = new MockToken("LAUNCHED");
+        launched.mint(remainderTo, remainder);
+    }
+
+    function test_LaunchVestingReceivesRemainderAndVests() public {
+        vm.prank(project);
+        VestingVault v = factory.createLaunchVesting(team, uint64(block.timestamp), 7 days, 28 days);
+        assertEq(address(v.token()), address(0));
+        assertTrue(factory.feePaid(block.chainid, address(v)));
+        assertEq(imd.balanceOf(radar), 5e18);
+
+        MockToken launched = _launch(address(v), 100_000_000e18);
+        assertEq(v.releasable(address(launched)), 0);
+
+        vm.warp(block.timestamp + 7 days + 7 days); // cliff, then one week of four
+        v.release(address(launched));
+        assertEq(launched.balanceOf(team), 25_000_000e18);
+
+        vm.warp(block.timestamp + 21 days);
+        v.release(address(launched));
+        assertEq(launched.balanceOf(team), 100_000_000e18);
+    }
+
+    function test_LaunchVestingVestsEveryTokenAndHasNoRecover() public {
+        vm.prank(project);
+        VestingVault v = factory.createLaunchVesting(team, uint64(block.timestamp), 0, 28 days);
+        MockToken launched = _launch(address(v), 1000e18);
+        imd.mint(address(v), 40e18);
+
+        vm.expectRevert(VestingVault.VestingToken.selector);
+        v.recover(IERC20(address(launched)));
+        vm.expectRevert(VestingVault.VestingToken.selector);
+        v.recover(IERC20(address(imd)));
+
+        vm.warp(block.timestamp + 14 days);
+        v.release(address(launched));
+        v.release(address(imd));
+        assertEq(launched.balanceOf(team), 500e18);
+        assertEq(imd.balanceOf(team), 20e18);
+    }
+
+    function test_BoundVestingRejectsOtherTokens() public {
+        VestingVault v = _vesting(1000e18, 0, 28 days);
+        imd.mint(address(v), 1e18);
+        assertEq(v.releasable(address(imd)), 0);
+        vm.expectRevert(abi.encodeWithSelector(VestingVault.NotVested.selector, address(imd)));
+        v.release(address(imd));
+    }
+
+    function test_EachLaunchVaultPaysItsOwnFee() public {
+        vm.startPrank(project);
+        VestingVault a = factory.createLaunchVesting(team, uint64(block.timestamp), 0, 28 days);
+        VestingVault b = factory.createLaunchVesting(team, uint64(block.timestamp), 0, 28 days);
+        TreasuryVault t = factory.createTreasury(address(0), project, 2 days, 1000, new address[](0));
+        vm.stopPrank();
+        assertEq(imd.balanceOf(radar), 15e18);
+        assertTrue(factory.feePaid(block.chainid, address(a)));
+        assertTrue(factory.feePaid(block.chainid, address(b)));
+        assertTrue(factory.feePaid(block.chainid, address(t)));
+        assertFalse(factory.feePaid(block.chainid, address(0)));
+        assertEq(factory.vaultsByToken(address(0)).length, 3);
+    }
+
+    function test_LaunchTreasuryReceivesRemainder() public {
+        vm.prank(project);
+        TreasuryVault t = factory.createTreasury(address(0), project, 1 days, 2500, _list(multisig));
+        MockToken launched = _launch(address(t), 1000e18);
+
+        vm.prank(project);
+        uint256 id = t.queue(address(launched), multisig, 250e18);
+        vm.warp(block.timestamp + 1 days);
+        t.execute(id);
+        assertEq(launched.balanceOf(multisig), 250e18);
+    }
+
+    function test_RobinhoodLaunchVaultPaidOnEthereum() public {
+        VaultFactory rh = new VaultFactory(IERC20(address(0)), address(0));
+        vm.prank(stranger);
+        VestingVault v = rh.createLaunchVesting(team, uint64(block.timestamp), 0, 28 days);
+        vm.prank(project);
+        factory.payFor(4663, address(v));
+        assertTrue(factory.feePaid(4663, address(v)));
+    }
+
+    function test_CreateVestingNeedsAToken() public {
+        vm.prank(project);
+        vm.expectRevert(VaultFactory.ZeroAddress.selector);
+        factory.createVesting(IERC20(address(0)), team, 1e18, uint64(block.timestamp), 0, 28 days);
     }
 
     // =================== treasury ===================

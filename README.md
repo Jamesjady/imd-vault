@@ -22,6 +22,21 @@ Nothing has an admin, a pause, an upgrade path or an emergency withdrawal.
 - Tightening a rule (longer delay, removed destination) also holds back withdrawals already queued.
 - A restricted treasury always keeps at least one destination, so it can never freeze itself.
 
+## Locking a launch's supply before the token exists
+
+When the IMD swarm launches a token, 10% of the supply goes to the swarm, part of the requester's 90% seeds the pool,
+and the rest is sent to `remainderTo` in the launch transaction (the paying wallet by default). A project can name a
+vault there instead, so its share never passes through the team's wallet:
+
+1. Before launching, create the vault: `createLaunchVesting(beneficiary, start, cliff, duration)`, or
+   `createTreasury(address(0), manager, delay, rateBps, destinations)`. It pays the 5 IMD fee, keyed to the vault.
+2. Put the vault's address as `remainderTo` in the launch body (`economics.remainderTo`).
+3. The remainder arrives in the vault when the token launches, and vests or waits behind the treasury rules from then on.
+
+An open vesting vault (`token` zero) vests every token it receives on the same schedule, so nothing can be pulled out
+early by sending it a different token first. On Robinhood, the free factory creates the vault and the fee is paid on
+Ethereum with `payFor(4663, vault)`.
+
 ## Build and test
 
 Requires [Foundry](https://getfoundry.sh). Dependencies: OpenZeppelin Contracts 5.1.0 and forge-std in `lib`.
@@ -37,7 +52,7 @@ The fork test runs against the real IMD token on Ethereum when an RPC is given:
 FORK_RPC=https://rpc.mevblocker.io forge test --match-contract Fork
 ```
 
-Tests cover the vesting math and cliff, top-ups, fee-on-transfer tokens, beneficiary and manager timelocks, the
+Tests cover the vesting math and cliff, vaults made before a launch that receive its remainder, top-ups, fee-on-transfer tokens, beneficiary and manager timelocks, the
 treasury delay, expiry, allowlist, weekly cap and ETH, stricter-only rule changes, the one-time fee (and paying for a Robinhood project), and fuzzing of
 the vesting payout, the 25%-a-week vesting ceiling and the treasury weekly cap.
 
