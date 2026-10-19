@@ -26,13 +26,13 @@ On 19 Oct it is a plain wallet (EOA) with about 10 IMD and 0.014 ETH.
 
 ## launch.open body (Ethereum)
 
-`POST /requests/import` returned the commit below, and `POST /requests/check` returned no blockers on 19 Oct.
+`POST /requests/import` returned the commit below, and `POST /requests/check` returned no blockers on 19 Oct (commit 3551d7d, with vaults for a launch's remainder).
 
 ```json
 {
   "objective": "Audit and deploy IMD Vault: ownerless vesting and treasury vaults for identity.md projects. Deploy exactly src/VaultFactory.sol with constructor arguments: imd_=0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7, feeRecipient_=$owner. The factory deploys VestingVault and TreasuryVault itself and charges each project 5 IMD once, paid to feeRecipient_ (IMD RADAR's public wallet); payFor(chainId, token) lets a project on another chain pay on Ethereum. It also creates open vaults before a token exists (createLaunchVesting, or createTreasury with projectToken zero) that a project names as its launch remainderTo; an open vesting vault vests every token it receives on the same schedule, and its fee is keyed to the vault address. Keep the rules exactly as written in the source and README: no owner, admin, pause, upgrade or emergency withdrawal; vesting unlocks at most 25% a week (duration of at least 4 weeks after the cliff); treasury withdrawals wait at least 24h and at most 25% of a balance can leave per week; every rule can only get stricter. Fix only real findings, and add a Foundry test for each fix.",
   "repoUrl": "https://github.com/Jamesjady/imd-vault.git",
-  "baseCommit": "42c0da52fc9a68c174a4eb32d614c334cc6e0008",
+  "baseCommit": "3551d7d187585834974e2fce2acd2862c675b39a",
   "contracts": [
     "src/VaultFactory.sol"
   ],
@@ -75,7 +75,7 @@ The swarm deploys on Robinhood too (`/requests/check` passed on 19 Oct). Open it
 {
   "objective": "Audit and deploy IMD Vault: ownerless vesting and treasury vaults for identity.md projects. Deploy exactly src/VaultFactory.sol with constructor arguments: imd_=0x0000000000000000000000000000000000000000, feeRecipient_=0x0000000000000000000000000000000000000000. This is the Robinhood Chain copy of the factory: with imd_ zero it charges no fee here; projects pay their one-time 5 IMD on the Ethereum factory with payFor(4663, token). The factory deploys VestingVault and TreasuryVault itself. It also creates open vaults before a token exists (createLaunchVesting, or createTreasury with projectToken zero) that a project names as its launch remainderTo; an open vesting vault vests every token it receives on the same schedule, and its fee is keyed to the vault address. Keep the rules exactly as written in the source and README: no owner, admin, pause, upgrade or emergency withdrawal; vesting unlocks at most 25% a week (duration of at least 4 weeks after the cliff); treasury withdrawals wait at least 24h and at most 25% of a balance can leave per week; every rule can only get stricter. Fix only real findings, and add a Foundry test for each fix.",
   "repoUrl": "https://github.com/Jamesjady/imd-vault.git",
-  "baseCommit": "42c0da52fc9a68c174a4eb32d614c334cc6e0008",
+  "baseCommit": "3551d7d187585834974e2fce2acd2862c675b39a",
   "contracts": [
     "src/VaultFactory.sol"
   ],
