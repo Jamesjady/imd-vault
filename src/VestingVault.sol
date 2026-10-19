@@ -21,7 +21,10 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 ///      it) never has anything unlocked before it exists. An open vault is funded later, by a launch it does not
 ///      control, so each token's linear unlock begins no earlier than the moment the vault records that token's arrival
 ///      (`sync`, which `release` also does): a launch that slips past `start + cliff` still vests from its arrival,
-///      never on it.
+///      never on it. The schedule is calendar-based per token, not per tranche: a later top-up of a token already
+///      held is unlocked by the fraction of the schedule that has elapsed. An open vault accounts per token address,
+///      so a token with two addresses to one balance would vest once per address; the radar refuses its seal to an
+///      open vault holding such a token, since the vault can not know the other address.
 contract VestingVault is ReentrancyGuard {
     using SafeERC20 for IERC20;
 

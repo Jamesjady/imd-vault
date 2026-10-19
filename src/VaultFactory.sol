@@ -31,14 +31,21 @@ contract VaultFactory {
     address[] public allVaults;
     mapping(address => bool) public isVault;
     mapping(address => address[]) internal _vaultsByToken;
+    /// @notice The wallet that created each vault. Once a token's fee is paid, anyone can register further vaults
+    ///         under it for free, so the radar files a vault under a project only when its creator is the project's
+    ///         (the fee payer in `FeePaid`, or a wallet the project names), and reads vaults from the events rather
+    ///         than the unbounded `vaultsByToken` list.
+    mapping(address => address) public creatorOf;
     /// @notice chainId => project token => whether the one-time fee has been paid.
     mapping(uint256 => mapping(address => bool)) public feePaid;
 
     event FeePaid(uint256 indexed chainId, address indexed token, address indexed payer, uint256 amount);
+    /// @dev `amount` is what the vault received (after any transfer fee of the token), not what was requested.
     event VestingCreated(
         address indexed vault,
         address indexed token,
         address indexed beneficiary,
+        address creator,
         uint256 amount,
         uint64 start,
         uint64 cliff,
@@ -48,6 +55,7 @@ contract VaultFactory {
         address indexed vault,
         address indexed projectToken,
         address indexed manager,
+        address creator,
         uint64 delay,
         uint16 rateBps,
         address[] destinations
@@ -68,17 +76,23 @@ contract VaultFactory {
     /// @notice Locks `amount` of `token` in a new vesting vault: nothing before `start + cliff`, then linear over
     ///         `duration` (at least 4 weeks). The caller must have approved this factory for the tokens and, for a
     ///         project's first vault on Ethereum, for 5 IMD.
-    function createVesting(IERC20 token, address beneficiary, uint256 amount, uint64 start, uint64 cliff, uint64 duration)
-        external
-        returns (VestingVault vault)
-    {
+    function createVesting(
+        IERC20 token,
+        address beneficiary,
+        uint256 amount,
+        uint64 start,
+        uint64 cliff,
+        uint64 duration
+    ) external returns (VestingVault vault) {
         if (address(token) == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
         _chargeOnce(address(token));
         vault = new VestingVault(token, beneficiary, start, cliff, duration, BENEFICIARY_DELAY);
+        uint256 before = token.balanceOf(address(vault));
         token.safeTransferFrom(msg.sender, address(vault), amount);
+        uint256 received = token.balanceOf(address(vault)) - before;
         _register(address(vault), address(token));
-        emit VestingCreated(address(vault), address(token), beneficiary, amount, start, cliff, duration);
+        emit VestingCreated(address(vault), address(token), beneficiary, msg.sender, received, start, cliff, duration);
     }
 
     /// @notice Creates an open vesting vault before the token exists, to be named as the swarm launch's
@@ -92,7 +106,7 @@ contract VaultFactory {
         vault = new VestingVault(IERC20(address(0)), beneficiary, start, cliff, duration, BENEFICIARY_DELAY);
         _chargeOnce(address(vault));
         _register(address(vault), address(0));
-        emit VestingCreated(address(vault), address(0), beneficiary, 0, start, cliff, duration);
+        emit VestingCreated(address(vault), address(0), beneficiary, msg.sender, 0, start, cliff, duration);
     }
 
     /// @notice Creates a treasury vault for `projectToken`. Fund it afterwards by sending tokens or ETH to it.
@@ -100,15 +114,18 @@ contract VaultFactory {
     ///         reopened). For a project's first vault on Ethereum the caller must have approved this factory for 5 IMD.
     ///         With `projectToken` zero it can be made before a launch and named as its `remainderTo`; the fee is
     ///         then keyed to the vault.
-    function createTreasury(address projectToken, address manager, uint64 delay, uint16 rateBps, address[] calldata destinations)
-        external
-        returns (TreasuryVault vault)
-    {
+    function createTreasury(
+        address projectToken,
+        address manager,
+        uint64 delay,
+        uint16 rateBps,
+        address[] calldata destinations
+    ) external returns (TreasuryVault vault) {
         if (delay < MIN_DELAY) revert BadDelay();
         vault = new TreasuryVault(projectToken, manager, delay, rateBps, destinations);
         _chargeOnce(projectToken != address(0) ? projectToken : address(vault));
         _register(address(vault), projectToken);
-        emit TreasuryCreated(address(vault), projectToken, manager, delay, rateBps, destinations);
+        emit TreasuryCreated(address(vault), projectToken, manager, msg.sender, delay, rateBps, destinations);
     }
 
     /// @notice Pays the one-time fee for a project on another chain (for example a Robinhood token), in IMD on
@@ -142,6 +159,7 @@ contract VaultFactory {
     function _register(address vault, address token) internal {
         allVaults.push(vault);
         isVault[vault] = true;
+        creatorOf[vault] = msg.sender;
         _vaultsByToken[token].push(vault);
     }
 }

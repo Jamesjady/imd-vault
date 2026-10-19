@@ -50,6 +50,20 @@ contract LegacyEntry {
     }
 }
 
+/// @dev Burns 1% of every transfer.
+contract AuditFeeToken is AuditToken {
+    constructor() AuditToken("FEE") {}
+
+    function _update(address from, address to, uint256 value) internal override {
+        if (from != address(0) && to != address(0)) {
+            uint256 fee = value / 100;
+            super._update(from, address(0), fee);
+            value -= fee;
+        }
+        super._update(from, to, value);
+    }
+}
+
 /// @notice One test per audit finding fixed in ADAPTATION.md. Each reproduced on the code as it arrived.
 contract AuditTest is Test {
     address radar = makeAddr("radar");
@@ -331,5 +345,209 @@ contract AuditTest is Test {
         TreasuryVault t = new TreasuryVault(address(token), project, 1 days, 2500, new address[](0));
         assertEq(t.delay(), 1 days);
         assertEq(t.MIN_DELAY(), factory.MIN_DELAY());
+    }
+
+    // =================== c693ed06: the weekly cap was per address, so two entry points to one balance got two ===================
+
+    function _doubleEntry() internal returns (DoubleEntryToken dbl, LegacyEntry legacy, TreasuryVault t) {
+        dbl = new DoubleEntryToken();
+        legacy = new LegacyEntry(dbl);
+        dbl.setLegacy(address(legacy));
+        vm.prank(project);
+        t = factory.createTreasury(address(dbl), project, 1 days, 2500, new address[](0));
+        dbl.mint(address(t), 1000e18);
+    }
+
+    function test_TreasuryCapIsSharedByTwoEntryPointsToOneBalance() public {
+        (DoubleEntryToken dbl, LegacyEntry legacy, TreasuryVault t) = _doubleEntry();
+        vm.startPrank(project);
+        uint256 a = t.queue(address(dbl), multisig, 250e18);
+        uint256 b = t.queue(address(legacy), multisig, 187.5e18);
+        uint256 c = t.queue(address(legacy), multisig, 1);
+        vm.stopPrank();
+        address[] memory tracked = t.trackedAssets();
+        assertEq(tracked.length, 2);
+        assertTrue(t.isTracked(address(dbl)) && t.isTracked(address(legacy)));
+
+        vm.warp(block.timestamp + 1 days);
+        // The main-address withdrawal is charged to the legacy address's window as well.
+        vm.expectEmit(true, true, false, true, address(t));
+        emit TreasuryVault.SharedBalanceCharged(a, address(legacy), 250e18);
+        t.execute(a);
+        assertEq(dbl.balanceOf(multisig), 250e18);
+        assertEq(t.availableThisWeek(address(legacy)), 0);
+        // So nothing more leaves through the second address this epoch, not even a wei.
+        vm.expectRevert(abi.encodeWithSelector(TreasuryVault.OverWeeklyCap.selector, 0));
+        t.execute(b);
+        vm.expectRevert(abi.encodeWithSelector(TreasuryVault.OverWeeklyCap.selector, 0));
+        t.execute(c);
+        assertEq(dbl.balanceOf(multisig), 250e18);
+
+        // Next epoch, the legacy address can withdraw its 25% of what is left, and then the main address is capped.
+        vm.warp((block.timestamp / t.EPOCH() + 1) * t.EPOCH());
+        vm.prank(project);
+        uint256 d = t.queue(address(dbl), multisig, 1);
+        vm.warp(block.timestamp + 1 days);
+        t.execute(b);
+        assertEq(dbl.balanceOf(multisig), 437.5e18);
+        vm.expectRevert(abi.encodeWithSelector(TreasuryVault.OverWeeklyCap.selector, 0));
+        t.execute(d);
+    }
+
+    function test_TreasuryCapThroughLegacyAddressFirstIsSharedToo() public {
+        (DoubleEntryToken dbl, LegacyEntry legacy, TreasuryVault t) = _doubleEntry();
+        vm.startPrank(project);
+        uint256 a = t.queue(address(legacy), multisig, 250e18);
+        uint256 b = t.queue(address(dbl), multisig, 1);
+        vm.stopPrank();
+        vm.warp(block.timestamp + 1 days);
+        t.execute(a);
+        vm.expectRevert(abi.encodeWithSelector(TreasuryVault.OverWeeklyCap.selector, 0));
+        t.execute(b);
+        assertEq(dbl.balanceOf(multisig), 250e18);
+    }
+
+    function test_TreasuryTrackedAssetsNeverBlockOtherWithdrawals() public {
+        vm.prank(project);
+        TreasuryVault t = factory.createTreasury(address(token), project, 1 days, 2500, new address[](0));
+        token.mint(address(t), 1000e18);
+        imd.mint(address(t), 100e18);
+        vm.startPrank(project);
+        uint256 junk = t.queue(stranger, multisig, 1); // an address without code, queued by mistake
+        uint256 a = t.queue(address(token), multisig, 250e18);
+        uint256 b = t.queue(address(imd), multisig, 25e18);
+        uint256 eth = t.queue(address(0), multisig, 1 ether);
+        vm.stopPrank();
+        vm.deal(address(t), 4 ether);
+        assertEq(t.trackedAssets().length, 3); // ETH is never tracked: a token transfer can not move it
+        vm.warp(block.timestamp + 1 days);
+        t.execute(a); // the unreadable asset is skipped, and an unrelated token's balance does not fall
+        t.execute(b);
+        t.execute(eth);
+        assertEq(token.balanceOf(multisig), 250e18);
+        assertEq(imd.balanceOf(multisig), 25e18);
+        assertEq(multisig.balance, 1 ether);
+        assertEq(t.availableThisWeek(address(imd)), 0);
+        vm.expectRevert(); // the junk asset itself still can not be withdrawn
+        t.execute(junk);
+    }
+
+    // =================== 960ccd81: a longer delay revived an expired withdrawal ===================
+
+    function test_IncreaseDelayNeverRevivesAnExpiredWithdrawal() public {
+        vm.prank(project);
+        TreasuryVault t = factory.createTreasury(address(token), project, 1 days, 2500, new address[](0));
+        token.mint(address(t), 1000e18);
+        uint64 t0 = uint64(block.timestamp);
+        vm.prank(project);
+        uint256 id = t.queue(address(token), multisig, 250e18);
+        (,,,, uint64 expiresAt,) = t.withdrawals(id);
+        assertEq(expiresAt, t0 + 1 days + t.GRACE());
+
+        vm.warp(t0 + 20 days);
+        vm.expectRevert(TreasuryVault.Expired.selector);
+        t.execute(id);
+        vm.prank(project);
+        t.increaseDelay(20 days);
+        vm.prank(stranger);
+        vm.expectRevert(TreasuryVault.Expired.selector);
+        t.execute(id);
+        assertEq(token.balanceOf(multisig), 0);
+    }
+
+    function test_IncreaseDelayPastTheExpiryClosesAQueuedWithdrawal() public {
+        vm.prank(project);
+        TreasuryVault t = factory.createTreasury(address(token), project, 1 days, 2500, new address[](0));
+        token.mint(address(t), 1000e18);
+        uint64 t0 = uint64(block.timestamp);
+        vm.startPrank(project);
+        uint256 id = t.queue(address(token), multisig, 250e18);
+        t.increaseDelay(20 days); // due T0+20d, expiry stays T0+15d: never executable, must be requeued
+        vm.stopPrank();
+        vm.warp(t0 + 10 days);
+        vm.expectRevert(abi.encodeWithSelector(TreasuryVault.TooEarly.selector, t0 + 20 days));
+        t.execute(id);
+        vm.warp(t0 + 20 days);
+        vm.expectRevert(TreasuryVault.Expired.selector);
+        t.execute(id);
+        // A fresh announcement under the new delay works as before.
+        vm.prank(project);
+        uint256 again = t.queue(address(token), multisig, 250e18);
+        vm.warp(block.timestamp + 20 days);
+        t.execute(again);
+        assertEq(token.balanceOf(multisig), 250e18);
+    }
+
+    // =================== 5811a810: a pending manager change kept the delay it was proposed with ===================
+
+    function test_PendingManagerFollowsTheCurrentDelay() public {
+        vm.prank(project);
+        TreasuryVault t = factory.createTreasury(address(token), project, 1 days, 2500, new address[](0));
+        uint64 t0 = uint64(block.timestamp);
+        vm.startPrank(project);
+        t.proposeManager(multisig);
+        assertEq(t.pendingManagerEta(), t0 + 1 days);
+        t.increaseDelay(30 days);
+        vm.stopPrank();
+        assertEq(t.pendingManagerEta(), t0 + 30 days);
+        vm.warp(t0 + 1 days);
+        vm.prank(multisig);
+        vm.expectRevert(abi.encodeWithSelector(TreasuryVault.TooEarly.selector, t0 + 30 days));
+        t.acceptManager();
+        vm.warp(t0 + 30 days);
+        vm.prank(multisig);
+        t.acceptManager();
+        assertEq(t.manager(), multisig);
+        assertEq(t.pendingManagerEta(), 0);
+    }
+
+    // =================== 8d4b11e3 and 28e462ee: who created a vault, and what it really received ===================
+
+    function test_FactoryRecordsTheCreatorOfEveryVault() public {
+        vm.prank(project);
+        VestingVault v =
+            factory.createVesting(IERC20(address(token)), team, 1000e18, uint64(block.timestamp), 0, 28 days);
+        assertEq(factory.creatorOf(address(v)), project);
+        // The fee for this token is paid, so a stranger's treasury under it is free, but it is filed as theirs.
+        vm.prank(stranger);
+        vm.expectEmit(true, true, true, true, address(factory));
+        emit VaultFactory.TreasuryCreated(
+            vm.computeCreateAddress(address(factory), vm.getNonce(address(factory))),
+            address(token),
+            stranger,
+            stranger,
+            1 days,
+            1,
+            new address[](0)
+        );
+        TreasuryVault t = factory.createTreasury(address(token), stranger, 1 days, 1, new address[](0));
+        assertEq(factory.creatorOf(address(t)), stranger);
+        assertEq(imd.balanceOf(radar), 5e18);
+        vm.prank(project);
+        VestingVault open = factory.createLaunchVesting(team, uint64(block.timestamp), 0, 28 days);
+        assertEq(factory.creatorOf(address(open)), project);
+        assertEq(factory.creatorOf(stranger), address(0));
+    }
+
+    function test_VestingCreatedLogsWhatTheVaultReceived() public {
+        AuditFeeToken fee = new AuditFeeToken();
+        fee.mint(project, 1000e18);
+        vm.startPrank(project);
+        fee.approve(address(factory), type(uint256).max);
+        uint64 now_ = uint64(block.timestamp);
+        vm.expectEmit(true, true, true, true, address(factory));
+        emit VaultFactory.VestingCreated(
+            vm.computeCreateAddress(address(factory), vm.getNonce(address(factory))),
+            address(fee),
+            team,
+            project,
+            990e18,
+            now_,
+            0,
+            28 days
+        );
+        VestingVault v = factory.createVesting(IERC20(address(fee)), team, 1000e18, now_, 0, 28 days);
+        vm.stopPrank();
+        assertEq(fee.balanceOf(address(v)), 990e18);
     }
 }

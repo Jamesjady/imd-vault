@@ -15,6 +15,14 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 ///      Two epochs can be straddled within any rolling 7 days, so the most that can leave in any 7-day span is
 ///      `rate + rate * (1 - rate)` of the balance at its start (43.75% at the 25% ceiling), and a rate decrease
 ///      applies from the next epoch when a withdrawal has already executed in the current one.
+///
+///      The cap is a rule on the balance, not on the address: a token reachable through two addresses that share one
+///      balance (a legacy contract forwarding to the main token, a proxy and its target) must not get one window per
+///      address. So every ERC-20 withdrawal reads the balances of every other asset the manager has ever queued,
+///      before and after the transfer, and any balance that fell is charged against that asset's window as well,
+///      as if it had been withdrawn through that address. Only the manager grows that set, by queueing, so only the
+///      manager pays for the loop it adds. An asset nobody queued keeps a window of its own, since the vault can not
+///      tell that two addresses share a balance until both are used.
 contract TreasuryVault is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -38,13 +46,17 @@ contract TreasuryVault is ReentrancyGuard {
     bool public restricted;
 
     address public pendingManager;
-    uint64 public pendingManagerEta;
+    /// @notice When the pending manager was proposed. The takeover waits the current delay from then, like a queued
+    ///         withdrawal, so raising the delay also holds back a change of manager already proposed.
+    uint64 public pendingManagerProposedAt;
 
     struct Withdrawal {
         address asset;
         address to;
         uint256 amount;
         uint64 queuedAt;
+        /// @dev Fixed when queued (`queuedAt + delay + GRACE`): raising the delay never revives an expired withdrawal.
+        uint64 expiresAt;
         bool done; // executed or cancelled
     }
 
@@ -52,6 +64,11 @@ contract TreasuryVault is ReentrancyGuard {
 
     mapping(address => bool) public isDestination;
     address[] internal _destinations;
+
+    /// @notice Every ERC-20 asset ever queued, each once. Their balances are watched on every ERC-20 withdrawal, so
+    ///         two addresses that share one balance share one weekly cap.
+    address[] internal _trackedAssets;
+    mapping(address => bool) public isTracked;
 
     struct Window {
         uint64 epoch;
@@ -65,6 +82,9 @@ contract TreasuryVault is ReentrancyGuard {
     event Queued(uint256 indexed id, address indexed asset, address indexed to, uint256 amount, uint64 eta);
     event Cancelled(uint256 indexed id);
     event Executed(uint256 indexed id, address indexed asset, address indexed to, uint256 amount);
+    /// @notice A withdrawal of another asset lowered `asset`'s balance too (two addresses to one balance), so the
+    ///         amount was charged against `asset`'s weekly window as well.
+    event SharedBalanceCharged(uint256 indexed id, address indexed asset, uint256 amount);
     event DelayIncreased(uint64 oldDelay, uint64 newDelay);
     event RateDecreased(uint16 oldBps, uint16 newBps);
     event DestinationsRestricted(address[] destinations);
@@ -134,9 +154,14 @@ contract TreasuryVault is ReentrancyGuard {
         if (to == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
         if (restricted && !isDestination[to]) revert NotAllowed(to);
+        if (asset != ETH && !isTracked[asset]) {
+            isTracked[asset] = true;
+            _trackedAssets.push(asset);
+        }
         id = withdrawals.length;
-        withdrawals.push(Withdrawal(asset, to, amount, uint64(block.timestamp), false));
-        emit Queued(id, asset, to, amount, uint64(block.timestamp) + delay);
+        uint64 eta = uint64(block.timestamp) + delay;
+        withdrawals.push(Withdrawal(asset, to, amount, uint64(block.timestamp), eta + uint64(GRACE), false));
+        emit Queued(id, asset, to, amount, eta);
     }
 
     function cancel(uint256 id) external onlyManager {
@@ -148,31 +173,39 @@ contract TreasuryVault is ReentrancyGuard {
 
     /// @notice Executes an announced withdrawal. Anyone can call it; the funds only go to the announced destination.
     /// @dev The current delay and destination list apply, so tightening either also holds back queued withdrawals.
+    ///      The expiry was fixed when the withdrawal was queued, so a longer delay can only shorten or close its
+    ///      execution window, never reopen one that has passed. An ERC-20 withdrawal that also lowers the balance of
+    ///      another tracked asset (two addresses to one balance) is charged against that asset's window too.
     function execute(uint256 id) external nonReentrant {
         Withdrawal storage w = _get(id);
         if (w.done) revert AlreadyDone();
         uint64 due = w.queuedAt + delay;
         if (block.timestamp < due) revert TooEarly(due);
-        if (block.timestamp > due + GRACE) revert Expired();
+        if (block.timestamp > w.expiresAt) revert Expired();
         if (restricted && !isDestination[w.to]) revert NotAllowed(w.to);
 
-        Window storage win = windows[w.asset];
-        uint64 epoch = uint64(block.timestamp / EPOCH);
-        if (win.epoch != epoch) {
-            win.epoch = epoch;
-            win.cap = (_balance(w.asset) * rateBps) / BPS;
-            win.spent = 0;
-        }
-        uint256 available = win.cap - win.spent;
-        if (w.amount > available) revert OverWeeklyCap(available);
-        win.spent += w.amount;
+        _charge(windows[w.asset], _balance(w.asset), w.amount);
         w.done = true;
 
         if (w.asset == ETH) {
             (bool ok,) = w.to.call{value: w.amount}("");
             if (!ok) revert EthTransferFailed();
         } else {
+            uint256 n = _trackedAssets.length;
+            uint256[] memory before = new uint256[](n);
+            for (uint256 i; i < n; ++i) {
+                if (_trackedAssets[i] != w.asset) before[i] = _tryBalance(_trackedAssets[i]);
+            }
             IERC20(w.asset).safeTransfer(w.to, w.amount);
+            for (uint256 i; i < n; ++i) {
+                address other = _trackedAssets[i];
+                if (other == w.asset) continue;
+                uint256 now_ = _tryBalance(other);
+                if (now_ >= before[i]) continue;
+                uint256 fell = before[i] - now_;
+                _charge(windows[other], before[i], fell);
+                emit SharedBalanceCharged(id, other, fell);
+            }
         }
         emit Executed(id, w.asset, w.to, w.amount);
     }
@@ -220,33 +253,46 @@ contract TreasuryVault is ReentrancyGuard {
     function proposeManager(address proposed) external onlyManager {
         if (proposed == address(0)) revert ZeroAddress();
         pendingManager = proposed;
-        pendingManagerEta = uint64(block.timestamp) + delay;
-        emit ManagerProposed(manager, proposed, pendingManagerEta);
+        pendingManagerProposedAt = uint64(block.timestamp);
+        emit ManagerProposed(manager, proposed, pendingManagerEta());
     }
 
     function cancelManager() external onlyManager {
         address proposed = pendingManager;
         if (proposed == address(0)) revert NoProposal();
         delete pendingManager;
-        delete pendingManagerEta;
+        delete pendingManagerProposedAt;
         emit ManagerCancelled(proposed);
     }
 
+    /// @notice The proposed manager takes over once the current delay has passed since the proposal.
     function acceptManager() external {
         address proposed = pendingManager;
         if (proposed == address(0)) revert NoProposal();
         if (msg.sender != proposed) revert NotPendingManager();
-        if (block.timestamp < pendingManagerEta) revert TooEarly(pendingManagerEta);
+        uint64 eta = pendingManagerEta();
+        if (block.timestamp < eta) revert TooEarly(eta);
         emit ManagerChanged(manager, proposed);
         manager = proposed;
         delete pendingManager;
-        delete pendingManagerEta;
+        delete pendingManagerProposedAt;
     }
 
     // ---------- views for the radar ----------
 
+    /// @notice When the pending manager can take over: the proposal time plus the current delay (zero if none).
+    function pendingManagerEta() public view returns (uint64) {
+        uint64 proposedAt = pendingManagerProposedAt;
+        return proposedAt == 0 ? 0 : proposedAt + delay;
+    }
+
     function destinations() external view returns (address[] memory) {
         return _destinations;
+    }
+
+    /// @notice Every ERC-20 asset ever queued, whose balances every ERC-20 withdrawal watches.
+    function trackedAssets() external view returns (address[] memory) {
+        return _trackedAssets;
     }
 
     function withdrawalCount() external view returns (uint256) {
@@ -281,5 +327,28 @@ contract TreasuryVault is ReentrancyGuard {
 
     function _balance(address asset) internal view returns (uint256) {
         return asset == ETH ? address(this).balance : IERC20(asset).balanceOf(address(this));
+    }
+
+    /// @dev `balanceOf` of a tracked asset, or zero when the call fails (an address without code, or a token that
+    ///      reverts): a watched asset that can not be read never blocks the others' withdrawals.
+    function _tryBalance(address asset) internal view returns (uint256) {
+        (bool ok, bytes memory data) =
+            asset.staticcall(abi.encodeWithSelector(IERC20.balanceOf.selector, address(this)));
+        if (!ok || data.length < 32) return 0;
+        return abi.decode(data, (uint256));
+    }
+
+    /// @dev Charges `amount` against `win` for the current epoch, opening it on `balance` (the balance before the
+    ///      withdrawal) when it is the first charge of the epoch.
+    function _charge(Window storage win, uint256 balance, uint256 amount) internal {
+        uint64 epoch = uint64(block.timestamp / EPOCH);
+        if (win.epoch != epoch) {
+            win.epoch = epoch;
+            win.cap = (balance * rateBps) / BPS;
+            win.spent = 0;
+        }
+        uint256 available = win.cap - win.spent;
+        if (amount > available) revert OverWeeklyCap(available);
+        win.spent += amount;
     }
 }

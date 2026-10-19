@@ -8,8 +8,36 @@ audit finding that reproduced on the code as it arrived (checked first with a sc
 smallest change that keeps the design: no owner, admin, pause, upgrade or emergency path was added, and every rule
 only got stricter.
 
-Verified with `forge build` and `forge test` (54 tests: the 38 that arrived, the fork test, and 15 new ones in
+Verified with `forge build` and `forge test` (62 tests: the 38 that arrived, the fork test, and 23 in
 `test/Audit.t.sol`), with the verifier's fuzz seed and three others.
+
+## Revision (independent review, second round)
+
+The reviewer's proof (`Proof_c693ed06fe5a`) failed on the accepted tree as reported and passes now. Each finding was
+reproduced first; changes 7 to 11 below answer the ones that held, and `.imd-responses.json` answers every id.
+
+| # | Finding (id) | File | Change | Test |
+|---|---|---|---|---|
+| 7 | medium `c693ed06` The treasury's weekly cap was keyed per asset address, so a token with two addresses to one balance (legacy forwarder, proxy and target) got a 25% window per address in one epoch: 43.75% in one block. | `src/TreasuryVault.sol` `queue`, `execute`, new `_charge`, `_tryBalance`, `trackedAssets()`, `isTracked`, event `SharedBalanceCharged` | `queue` records every ERC-20 asset once in `_trackedAssets` (only the manager grows it). An ERC-20 `execute` reads the other tracked balances before and after the transfer; a balance that fell is charged against that asset's window for the current epoch, opened on its pre-transfer balance, and reverts `OverWeeklyCap` if it does not fit. So both addresses of one balance share one 25% window as soon as both have been queued, in whichever order they are used; the reviewer's expected outcome (`execute(b)` reverts `OverWeeklyCap(0)`, 25% leaves) is exactly what happens. Balances are read with a `staticcall` and a failure counts as zero, so an asset queued by mistake (no code) never blocks the others. ETH is not tracked: a token transfer can not move it. The cap for an asset never queued is unchanged. | `test_TreasuryCapIsSharedByTwoEntryPointsToOneBalance`, `test_TreasuryCapThroughLegacyAddressFirstIsSharedToo`, `test_TreasuryTrackedAssetsNeverBlockOtherWithdrawals`; the proof itself passes |
+| 8 | low `960ccd81` `increaseDelay` moved a queued withdrawal's whole execution window later, so an expired withdrawal came back to life, executable by anyone with no new announcement. Reproduced: with delay 1 day, a withdrawal expired at T0+15d executed at T0+20d after `increaseDelay(20 days)`. | `src/TreasuryVault.sol` `Withdrawal.expiresAt`, `queue`, `execute` | The expiry is fixed when the withdrawal is queued (`queuedAt + delay + GRACE`) and stored in the `Withdrawal`; `execute` checks it instead of `due + GRACE`. The due time still follows the current delay, so a longer delay holds queued withdrawals back and, if it pushes `due` past `expiresAt`, closes them until requeued. The `withdrawals(id)` getter gains the field. | `test_IncreaseDelayNeverRevivesAnExpiredWithdrawal`, `test_IncreaseDelayPastTheExpiryClosesAQueuedWithdrawal` |
+| 9 | info `5811a810` A pending manager change kept the delay it was proposed with after `increaseDelay`, unlike queued withdrawals. Reproduced. | `src/TreasuryVault.sol` `pendingManagerProposedAt`, `pendingManagerEta()`, `proposeManager`, `acceptManager` | The proposal time is stored and `pendingManagerEta()` is now a view returning it plus the current delay (same name and return type as the old getter), which `acceptManager` checks. | `test_PendingManagerFollowsTheCurrentDelay` |
+| 10 | low `8d4b11e3` Once a token's fee was paid, anyone could file free vaults under it with nothing tying a vault to the project that paid, polluting what the radar shows and growing the unbounded `vaultsByToken` view. Reproduced. | `src/VaultFactory.sol` `creatorOf`, `VestingCreated`/`TreasuryCreated` gain a `creator` field | The registry records the creator of each vault and both creation events carry it, so the radar files a vault under a project only when its creator is the project's (the `FeePaid` payer or a wallet the project names) and reads vaults from events, not the unbounded list (README, seal section). The fee rule ("the first vault for a token; later ones are free") is unchanged: charging per (token, creator) would make a project that uses two wallets pay twice, and the fee is the requester's. | `test_FactoryRecordsTheCreatorOfEveryVault` |
+| 11 | info `28e462ee` `VestingCreated` logged the requested amount, not what a fee-on-transfer token delivered. Reproduced. | `src/VaultFactory.sol` `createVesting` | Emits the vault's balance after the transfer minus before. | `test_VestingCreatedLogsWhatTheVaultReceived` |
+
+Documented, not changed (each reproduced as described; the finding itself asks for documentation or an off-chain rule, and a contract change would redesign what the brief says to keep):
+
+- low `93c43379` An open vesting vault accounts per token address, so a double-entry token would vest once per address.
+  The finding's option (a): the contracts can not watch "the other assets" without a set that anyone can pad through
+  the public `sync()` (and bounding it to released assets is still paddable over the schedule), and binding the vault
+  to its first token contradicts "vests every token it receives". README and the `VestingVault` NatSpec now state the
+  limitation, and the seal section says the radar refuses its seal to an open vault holding such a token. An
+  IMD-launched token has one address, so the launch flow is unaffected.
+- low `7f9d9778` Tokens arriving after the unlock has advanced vest by the elapsed fraction (a top-up after the
+  schedule is a pass-through). This is the documented design ("later top-ups vest on the same schedule"), which the
+  brief says to keep; per-tranche accounting would be the redesign the finding itself does not ask for. The README
+  now states it plainly and the seal section counts locked supply as `balance − releasable(token)`.
+- info `cc57dd0d` The cap rounds down to zero for a balance below `10_000 / rateBps` units, and an asset decays
+  geometrically, so its last dust never leaves. A direct consequence of the rule as written; documented in the README.
 
 ## Changes
 
@@ -37,7 +65,8 @@ Verified with `forge build` and `forge test` (54 tests: the 38 that arrived, the
   does after a real launch (change 2), and the open-vault test that sends IMD syncs it too. The treasury launch test
   mints directly, since a treasury has no clock. Two assertions on `arrivedAt` and `unlockStart` were added. No
   expected amount or date changed.
-- `test/Audit.t.sol` is new: one test per change above, with a double-entry token mock for change 4.
+- `test/Audit.t.sol` is new: one test per change above, with a double-entry token mock for changes 4 and 7 and a
+  fee-on-transfer mock for change 11.
 
 ## Open items for the deployer
 
