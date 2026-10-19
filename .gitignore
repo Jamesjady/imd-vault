@@ -1,0 +1,6 @@
+contracts/out/
+contracts/cache/
+.env
+
+# Internal notes, never published
+PLAN.md
