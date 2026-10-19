@@ -16,7 +16,7 @@ On 19 Oct it is a plain wallet (EOA) with about 10 IMD and 0.014 ETH.
 ## Before paying
 
 1. Push `imd-vault` to a new **public** GitHub repository, `imd-vault`.
-   - `contracts/lib/` goes in as well: OpenZeppelin 5.1.0 and forge-std, vendored.
+   - `lib/` goes in as well: OpenZeppelin 5.1.0 and forge-std, vendored.
    - `foundry.toml` already has `bytecode_hash = "none"`, as the import requires.
    - Needs the user's OK: our rule is private repos, but the swarm only imports public ones.
 2. Resolve the commit: `POST /requests/import` with the repo URL. It returns `repoUrl` and `baseCommit`.
@@ -28,10 +28,10 @@ On 19 Oct it is a plain wallet (EOA) with about 10 IMD and 0.014 ETH.
 
 ```json
 {
-  "objective": "Audit and deploy IMD Vault: ownerless vesting and treasury vaults for identity.md projects. Deploy exactly contracts/src/VaultFactory.sol with constructor arguments: imd_=0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7, feeRecipient_=$owner. The factory deploys VestingVault and TreasuryVault itself and charges each project 5 IMD once, paid to feeRecipient_ (IMD RADAR's public wallet); payFor(chainId, token) lets a project on another chain pay on Ethereum. Keep the rules exactly as written in the source and README: no owner, admin, pause, upgrade or emergency withdrawal; vesting unlocks at most 25% a week (duration of at least 4 weeks after the cliff); treasury withdrawals wait at least 24h and at most 25% of a balance can leave per week; every rule can only get stricter. Fix only real findings, and add a Foundry test for each fix.",
+  "objective": "Audit and deploy IMD Vault: ownerless vesting and treasury vaults for identity.md projects. Deploy exactly src/VaultFactory.sol with constructor arguments: imd_=0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7, feeRecipient_=$owner. The factory deploys VestingVault and TreasuryVault itself and charges each project 5 IMD once, paid to feeRecipient_ (IMD RADAR's public wallet); payFor(chainId, token) lets a project on another chain pay on Ethereum. Keep the rules exactly as written in the source and README: no owner, admin, pause, upgrade or emergency withdrawal; vesting unlocks at most 25% a week (duration of at least 4 weeks after the cliff); treasury withdrawals wait at least 24h and at most 25% of a balance can leave per week; every rule can only get stricter. Fix only real findings, and add a Foundry test for each fix.",
   "repoUrl": "https://github.com/Jamesjady/imd-vault",
   "baseCommit": "<from /requests/import>",
-  "contracts": ["contracts/src/VaultFactory.sol"],
+  "contracts": ["src/VaultFactory.sol"],
   "references": ["solidity-security-review", "eth-security", "pashov-skill"],
   "onchain": "evm_contracts",
   "chainId": 1,

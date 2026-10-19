@@ -5,7 +5,7 @@ written in code, and IMD RADAR shows those rules, and every move, on the project
 
 Built for the Identity MD Hackathon (October 2026). See [SWARM_BRIEF.md](SWARM_BRIEF.md) for the audit and deployment through the IMD swarm.
 
-## Contracts (`contracts/src`)
+## Contracts (`src`)
 
 | Contract | What it does |
 |---|---|
@@ -24,10 +24,9 @@ Nothing has an admin, a pause, an upgrade path or an emergency withdrawal.
 
 ## Build and test
 
-Requires [Foundry](https://getfoundry.sh). Dependencies: OpenZeppelin Contracts 5.1.0 and forge-std in `contracts/lib`.
+Requires [Foundry](https://getfoundry.sh). Dependencies: OpenZeppelin Contracts 5.1.0 and forge-std in `lib`.
 
 ```bash
-cd contracts
 forge install OpenZeppelin/openzeppelin-contracts@v5.1.0 foundry-rs/forge-std --no-git
 forge test
 ```
