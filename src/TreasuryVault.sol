@@ -10,14 +10,19 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 ///         withdrawal; it executes after a public delay, only to an allowed destination, and no more than a fixed
 ///         share of the balance can leave per week. Every rule can only become stricter after creation. There is no
 ///         admin, no pause, no upgrade and no emergency withdrawal. The weekly share can never exceed 25%.
-/// @dev `address(0)` stands for ETH everywhere. The weekly cap is measured per asset, per fixed 7-day epoch, as
-///      `rateBps` of the balance seen by the first withdrawal executed in that epoch.
+/// @dev `address(0)` stands for ETH everywhere. The weekly cap is measured per asset, per fixed 7-day epoch
+///      (`block.timestamp / 7 days`), as `rateBps` of the balance seen by the first withdrawal executed in that epoch.
+///      Two epochs can be straddled within any rolling 7 days, so the most that can leave in any 7-day span is
+///      `rate + rate * (1 - rate)` of the balance at its start (43.75% at the 25% ceiling), and a rate decrease
+///      applies from the next epoch when a withdrawal has already executed in the current one.
 contract TreasuryVault is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     address public constant ETH = address(0);
     uint256 public constant EPOCH = 7 days;
     uint256 public constant GRACE = 14 days;
+    /// @notice Withdrawals wait at least 24h. Checked here as well as in the factory, so the rule is in the vault.
+    uint256 public constant MIN_DELAY = 1 days;
     uint256 public constant MAX_DELAY = 30 days;
     uint256 public constant BPS = 10_000;
     /// @notice At most 25% of a treasury can leave per week.
@@ -91,9 +96,15 @@ contract TreasuryVault is ReentrancyGuard {
         _;
     }
 
-    constructor(address projectToken_, address manager_, uint64 delay_, uint16 rateBps_, address[] memory destinations_) {
+    constructor(
+        address projectToken_,
+        address manager_,
+        uint64 delay_,
+        uint16 rateBps_,
+        address[] memory destinations_
+    ) {
         if (manager_ == address(0)) revert ZeroAddress();
-        if (delay_ > MAX_DELAY) revert BadDelay();
+        if (delay_ < MIN_DELAY || delay_ > MAX_DELAY) revert BadDelay();
         if (rateBps_ == 0 || rateBps_ > MAX_RATE_BPS) revert BadRate();
         projectToken = projectToken_;
         manager = manager_;

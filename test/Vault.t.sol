@@ -279,9 +279,12 @@ contract VaultTest is Test {
         factory.createVesting(IERC20(address(token)), team, 1e18, uint64(block.timestamp), 0, 28 days);
     }
 
-    function testFuzz_VestingNeverUnlocksMoreThan25PercentInAWeek(uint256 amount, uint64 cliff, uint64 duration, uint64 at)
-        public
-    {
+    function testFuzz_VestingNeverUnlocksMoreThan25PercentInAWeek(
+        uint256 amount,
+        uint64 cliff,
+        uint64 duration,
+        uint64 at
+    ) public {
         amount = bound(amount, 1e6, 1_000_000e18);
         duration = uint64(bound(duration, 28 days, 4 * 365 days));
         cliff = uint64(bound(cliff, 0, 365 days));
@@ -291,7 +294,9 @@ contract VaultTest is Test {
         assertLe(week, amount / 4 + 1);
     }
 
-    function testFuzz_VestingNeverOverpays(uint256 amount, uint64 cliff, uint64 duration, uint32[4] memory steps) public {
+    function testFuzz_VestingNeverOverpays(uint256 amount, uint64 cliff, uint64 duration, uint32[4] memory steps)
+        public
+    {
         amount = bound(amount, 1, 1_000_000e18);
         duration = uint64(bound(duration, 28 days, 4 * 365 days));
         cliff = uint64(bound(cliff, 0, 365 days));
@@ -313,10 +318,13 @@ contract VaultTest is Test {
     // =================== vaults made before the launch (remainderTo) ===================
 
     /// @dev Stands in for the swarm's launch factory: it mints the supply and sends the remainder to remainderTo
-    ///      in the same transaction, as launch 2242 did on chain.
+    ///      in the same transaction, as launch 2242 did on chain. The launch does not tell the vault, so the project
+    ///      records the arrival right after with `sync` (audit finding 5dbb3b32: an open vault's clock runs from the
+    ///      recorded arrival, never from a calendar date the launch may have slipped past).
     function _launch(address remainderTo, uint256 remainder) internal returns (MockToken launched) {
         launched = new MockToken("LAUNCHED");
         launched.mint(remainderTo, remainder);
+        VestingVault(remainderTo).sync(address(launched));
     }
 
     function test_LaunchVestingReceivesRemainderAndVests() public {
@@ -327,6 +335,8 @@ contract VaultTest is Test {
         assertEq(imd.balanceOf(radar), 5e18);
 
         MockToken launched = _launch(address(v), 100_000_000e18);
+        assertEq(v.arrivedAt(address(launched)), uint64(block.timestamp));
+        assertEq(v.unlockStart(address(launched)), uint64(block.timestamp + 7 days));
         assertEq(v.releasable(address(launched)), 0);
 
         vm.warp(block.timestamp + 7 days + 7 days); // cliff, then one week of four
@@ -343,6 +353,7 @@ contract VaultTest is Test {
         VestingVault v = factory.createLaunchVesting(team, uint64(block.timestamp), 0, 28 days);
         MockToken launched = _launch(address(v), 1000e18);
         imd.mint(address(v), 40e18);
+        v.sync(address(imd));
 
         vm.expectRevert(VestingVault.VestingToken.selector);
         v.recover(IERC20(address(launched)));
@@ -381,7 +392,8 @@ contract VaultTest is Test {
     function test_LaunchTreasuryReceivesRemainder() public {
         vm.prank(project);
         TreasuryVault t = factory.createTreasury(address(0), project, 1 days, 2500, _list(multisig));
-        MockToken launched = _launch(address(t), 1000e18);
+        MockToken launched = new MockToken("LAUNCHED");
+        launched.mint(address(t), 1000e18); // a treasury has no clock to start
 
         vm.prank(project);
         uint256 id = t.queue(address(launched), multisig, 250e18);
@@ -589,7 +601,9 @@ contract VaultTest is Test {
         uint256 epoch = t.EPOCH();
         uint256[5] memory ids;
         vm.startPrank(project);
-        for (uint256 i; i < 5; ++i) ids[i] = t.queue(address(token), multisig, bound(amounts[i], 1, balance));
+        for (uint256 i; i < 5; ++i) {
+            ids[i] = t.queue(address(token), multisig, bound(amounts[i], 1, balance));
+        }
         vm.stopPrank();
         vm.warp(((block.timestamp + 1 days) / epoch + 1) * epoch + 1 hours);
 
