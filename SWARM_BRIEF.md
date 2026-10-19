@@ -22,17 +22,37 @@ On 19 Oct it is a plain wallet (EOA) with about 10 IMD and 0.014 ETH.
 2. Resolve the commit: `POST /requests/import` with the repo URL. It returns `repoUrl` and `baseCommit`.
 3. Run the launch body below through `POST /requests/check` (free). Fix anything it refuses; a refused body is a
    spent payment.
-4. The radar wallet pays 0.5 IMD for `launch.open`.
+4. The radar wallet pays 0.5 IMD for `launch.open`, at explorer.imd.fun/launch or through `POST /requests/quote`.
 
 ## launch.open body (Ethereum)
+
+`POST /requests/import` returned the commit below, and `POST /requests/check` returned no blockers on 19 Oct.
 
 ```json
 {
   "objective": "Audit and deploy IMD Vault: ownerless vesting and treasury vaults for identity.md projects. Deploy exactly src/VaultFactory.sol with constructor arguments: imd_=0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7, feeRecipient_=$owner. The factory deploys VestingVault and TreasuryVault itself and charges each project 5 IMD once, paid to feeRecipient_ (IMD RADAR's public wallet); payFor(chainId, token) lets a project on another chain pay on Ethereum. Keep the rules exactly as written in the source and README: no owner, admin, pause, upgrade or emergency withdrawal; vesting unlocks at most 25% a week (duration of at least 4 weeks after the cliff); treasury withdrawals wait at least 24h and at most 25% of a balance can leave per week; every rule can only get stricter. Fix only real findings, and add a Foundry test for each fix.",
-  "repoUrl": "https://github.com/Jamesjady/imd-vault",
-  "baseCommit": "<from /requests/import>",
-  "contracts": ["src/VaultFactory.sol"],
-  "references": ["solidity-security-review", "eth-security", "pashov-skill"],
+  "repoUrl": "https://github.com/Jamesjady/imd-vault.git",
+  "baseCommit": "42c0da52fc9a68c174a4eb32d614c334cc6e0008",
+  "contracts": [
+    "src/VaultFactory.sol"
+  ],
+  "shape": "chain",
+  "steps": [
+    {
+      "skill": "audit-imported-code"
+    },
+    {
+      "skill": "adapt-contract-project"
+    },
+    {
+      "skill": "adversarial-review"
+    }
+  ],
+  "references": [
+    "solidity-security-review",
+    "eth-security",
+    "pashov-skill"
+  ],
   "onchain": "evm_contracts",
   "chainId": 1,
   "owner": "0x75df3d2e7a1d23021e5d7ef06312d13009e9bbb8",
@@ -48,10 +68,40 @@ On 19 Oct it is a plain wallet (EOA) with about 10 IMD and 0.014 ETH.
 
 The Robinhood factory takes no fee: `imd_` and `feeRecipient_` are both zero, and projects pay on Ethereum with
 `payFor(4663, token)`. Two ways to deploy it:
-- **Through the swarm**, if `/requests/check` accepts `chainId: 4663` for `evm_contracts`: the same body with
-  `"chainId": 4663` and the objective's constructor arguments changed to `imd_=0x0000000000000000000000000000000000000000,
-  feeRecipient_=0x0000000000000000000000000000000000000000`. Another 0.5 IMD. Same audited code, so ask for no changes.
-- **Ourselves**, if it does not: `forge create` from the audited commit, signed by the user. Gas only.
+The swarm deploys on Robinhood too (`/requests/check` passed on 19 Oct). Open it **after** the Ethereum launch, with
+`baseCommit` set to the commit the Ethereum job delivers, so both chains run the same audited code:
+
+```json
+{
+  "objective": "Audit and deploy IMD Vault: ownerless vesting and treasury vaults for identity.md projects. Deploy exactly src/VaultFactory.sol with constructor arguments: imd_=0x0000000000000000000000000000000000000000, feeRecipient_=0x0000000000000000000000000000000000000000. The factory deploys VestingVault and TreasuryVault itself and charges each project 5 IMD once, paid to feeRecipient_ (IMD RADAR's public wallet); payFor(chainId, token) lets a project on another chain pay on Ethereum. Keep the rules exactly as written in the source and README: no owner, admin, pause, upgrade or emergency withdrawal; vesting unlocks at most 25% a week (duration of at least 4 weeks after the cliff); treasury withdrawals wait at least 24h and at most 25% of a balance can leave per week; every rule can only get stricter. Fix only real findings, and add a Foundry test for each fix.",
+  "repoUrl": "https://github.com/Jamesjady/imd-vault.git",
+  "baseCommit": "42c0da52fc9a68c174a4eb32d614c334cc6e0008",
+  "contracts": [
+    "src/VaultFactory.sol"
+  ],
+  "shape": "chain",
+  "steps": [
+    {
+      "skill": "audit-imported-code"
+    },
+    {
+      "skill": "adapt-contract-project"
+    },
+    {
+      "skill": "adversarial-review"
+    }
+  ],
+  "references": [
+    "solidity-security-review",
+    "eth-security",
+    "pashov-skill"
+  ],
+  "onchain": "evm_contracts",
+  "chainId": 4663,
+  "owner": "0x75df3d2e7a1d23021e5d7ef06312d13009e9bbb8",
+  "github": true
+}
+```
 
 ## What we check when it is live
 
@@ -65,9 +115,9 @@ The Robinhood factory takes no fee: `imd_` and `feeRecipient_` are both zero, an
 | Item | IMD |
 |---|---|
 | `launch.open` Ethereum (audit + deploy) | 0.5 |
-| `launch.open` Robinhood (if the swarm supports it) | 0–0.5 |
+| `launch.open` Robinhood | 0.5 |
 | Possible `job.continue` rounds if the judge asks for fixes (each 0.5) | 0.5–2 |
-| **Total** | **1–3** |
+| **Total** | **1.5–3** |
 
 The wallet's 10 IMD covers it. ETH is only needed for the transactions that pay the jobs.
 
