@@ -99,7 +99,7 @@ withdrawal, the pending manager's delay, the creator in the registry and the rec
 
 - IMD (Ethereum): `0xD34a99Bc0f67aE1bbd63C660e6d0b0dd03E263B7`
 - VaultFactory (Ethereum): [`0xdbaff609cd0500527a2a102f5cbbbbc70fd2ff5b`](https://etherscan.io/address/0xdbaff609cd0500527a2a102f5cbbbbc70fd2ff5b), audited and deployed by the IMD swarm in launch 2244 ([job](https://explorer.imd.fun/jobs/b384d442-601d-4fbb-9b90-3681b2aa1868), [delivered source](https://github.com/identity-md-launches/launch-2244-audit-deploy-imd-vault)). Fee recipient: IMD RADAR, `0x75df3d2e7a1d23021e5d7ef06312d13009e9bbb8`.
-- VaultFactory (Robinhood): pending, the same audited code with `imd_` and `feeRecipient_` zero.
+- VaultFactory (Robinhood): [`0x349056e0e8f333ce3300df09afe44dd8160ba8dd`](https://robinhoodchain.blockscout.com/address/0x349056e0e8f333ce3300df09afe44dd8160ba8dd), swarm launch 2251 ([job](https://explorer.imd.fun/jobs/64ce1d7b-85d2-42cf-a196-0dea01c6cb65), [delivered source](https://github.com/identity-md-launches/launch-2251-deploy-audited-imd-vault)). The same audited factory with `imd_` and `feeRecipient_` zero, deployed as `VaultFactoryNoFee`, a zero-argument wrapper that adds nothing. Projects pay the fee on Ethereum with `payFor(4663, token or vault)`.
 
 ## The IMD RADAR seal
 
