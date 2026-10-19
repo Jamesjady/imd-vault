@@ -1,0 +1,13 @@
+{
+  "kind": "evm_contracts",
+  "contracts": [
+    {
+      "contract": "VaultFactory",
+      "constructorArgs": [
+        "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7",
+        "$owner"
+      ]
+    }
+  ],
+  "notes": "Deploy VaultFactory on Ethereum with the existing IMD token and $owner as the immutable fee recipient (IMD RADAR's public wallet), with no ownership or administrative powers. The factory creates VestingVault and TreasuryVault on demand and charges 5 IMD once per chain/project key; payFor(chainId, token) pays for projects on other chains. Open vesting vaults and treasuries created with no project token use their vault address as the fee key and can receive a launch's remainderTo allocation. Every token in an open vesting vault vests, with its unlock starting at the later of start plus cliff and its recorded arrival via sync or release. Vesting duration is at least 28 days after the cliff and can only increase. Treasury withdrawals wait at least 24 hours and are capped at 25% per asset per fixed 7-day epoch, as documented; this is not a rolling cap and can permit 43.75% across an epoch boundary. Treasury rules can only tighten. There is no admin, pause, upgrade or emergency withdrawal."
+}
